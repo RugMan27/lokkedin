@@ -71,6 +71,29 @@ const CHROME_GROUP_COLORS = {
   orange: [250, 144, 62],
 };
 
+function safeLocalGet(key) {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalSet(key, value) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
+
+function safeLocalRemove(key) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(key);
+  } catch {}
+}
+
 export function hexToChromeGroupColor(hex, fallback = 'green') {
   if (!hex || typeof hex !== 'string') return fallback;
   const clean = hex.replace('#', '').trim();
@@ -117,7 +140,7 @@ export async function getSettings() {
   const storage = getStorageArea();
   if (!storage) {
     try {
-      const local = localStorage.getItem(STORAGE_KEYS.SETTINGS);
+      const local = safeLocalGet(STORAGE_KEYS.SETTINGS);
       return local ? { ...DEFAULT_SETTINGS, ...JSON.parse(local) } : { ...DEFAULT_SETTINGS };
     } catch {
       return { ...DEFAULT_SETTINGS };
@@ -144,9 +167,7 @@ export async function saveSettings(partialSettings) {
   if (storage) {
     await storage.set({ [STORAGE_KEYS.SETTINGS]: updated });
   } else {
-    try {
-      localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(updated));
-    } catch {}
+    safeLocalSet(STORAGE_KEYS.SETTINGS, JSON.stringify(updated));
   }
   return updated;
 }
@@ -166,9 +187,7 @@ export async function resetSettingsToDefault() {
   if (storage) {
     await storage.set({ [STORAGE_KEYS.SETTINGS]: reset });
   } else {
-    try {
-      localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(reset));
-    } catch {}
+    safeLocalSet(STORAGE_KEYS.SETTINGS, JSON.stringify(reset));
   }
   return reset;
 }
@@ -183,7 +202,7 @@ export async function getTimerState() {
     }
   } else {
     try {
-      const raw = localStorage.getItem(STORAGE_KEYS.TIMER_STATE);
+      const raw = safeLocalGet(STORAGE_KEYS.TIMER_STATE);
       if (raw) state = { ...DEFAULT_TIMER_STATE, ...JSON.parse(raw) };
     } catch {}
   }
@@ -202,9 +221,7 @@ export async function saveTimerState(partialTimer) {
   if (storage) {
     await storage.set({ [STORAGE_KEYS.TIMER_STATE]: updated });
   } else {
-    try {
-      localStorage.setItem(STORAGE_KEYS.TIMER_STATE, JSON.stringify(updated));
-    } catch {}
+    safeLocalSet(STORAGE_KEYS.TIMER_STATE, JSON.stringify(updated));
   }
   return updated;
 }
@@ -311,7 +328,7 @@ export async function getLocalTabCache() {
     return data?.[STORAGE_KEYS.LOCAL_TAB_CACHE] || {};
   }
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.LOCAL_TAB_CACHE);
+    const raw = safeLocalGet(STORAGE_KEYS.LOCAL_TAB_CACHE);
     return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
@@ -332,9 +349,7 @@ export async function saveLocalTabCacheEntries(newEntries) {
   if (storage) {
     await storage.set({ [STORAGE_KEYS.LOCAL_TAB_CACHE]: updated });
   } else {
-    try {
-      localStorage.setItem(STORAGE_KEYS.LOCAL_TAB_CACHE, JSON.stringify(updated));
-    } catch {}
+    safeLocalSet(STORAGE_KEYS.LOCAL_TAB_CACHE, JSON.stringify(updated));
   }
   return updated;
 }
@@ -344,7 +359,7 @@ export async function clearLocalTabCache() {
   if (storage) {
     await storage.remove(STORAGE_KEYS.LOCAL_TAB_CACHE);
   } else {
-    localStorage.removeItem(STORAGE_KEYS.LOCAL_TAB_CACHE);
+    safeLocalRemove(STORAGE_KEYS.LOCAL_TAB_CACHE);
   }
 }
 
@@ -445,10 +460,10 @@ async function getOrCreateClientId() {
     }
     return clientId;
   }
-  let localId = localStorage.getItem(STORAGE_KEYS.CLIENT_ID);
+  let localId = safeLocalGet(STORAGE_KEYS.CLIENT_ID);
   if (!localId) {
     localId = `usr_${Math.random().toString(36).slice(2, 14)}`;
-    localStorage.setItem(STORAGE_KEYS.CLIENT_ID, localId);
+    safeLocalSet(STORAGE_KEYS.CLIENT_ID, localId);
   }
   return localId;
 }
@@ -458,7 +473,7 @@ export async function clearStoredBearerToken() {
   if (storage) {
     await storage.remove(STORAGE_KEYS.BEARER_TOKEN);
   } else {
-    localStorage.removeItem(STORAGE_KEYS.BEARER_TOKEN);
+    safeLocalRemove(STORAGE_KEYS.BEARER_TOKEN);
   }
 }
 
@@ -481,7 +496,7 @@ export async function getAuthToken({ forceRefresh = false } = {}) {
         return data[STORAGE_KEYS.BEARER_TOKEN];
       }
     } else {
-      const cached = localStorage.getItem(STORAGE_KEYS.BEARER_TOKEN);
+      const cached = safeLocalGet(STORAGE_KEYS.BEARER_TOKEN);
       if (cached) return cached;
     }
   }
@@ -500,7 +515,7 @@ export async function getAuthToken({ forceRefresh = false } = {}) {
         if (storage) {
           await storage.set({ [STORAGE_KEYS.BEARER_TOKEN]: data.token });
         } else {
-          localStorage.setItem(STORAGE_KEYS.BEARER_TOKEN, data.token);
+          safeLocalSet(STORAGE_KEYS.BEARER_TOKEN, data.token);
         }
         return data.token;
       }
@@ -569,9 +584,16 @@ export async function getAnalyzableTabs(windowId) {
   if (typeof chrome === 'undefined' || !chrome.tabs?.query) {
     return [];
   }
-  const targetWindow = windowId ?? chrome.windows.WINDOW_ID_CURRENT;
-  const allTabs = await chrome.tabs.query({ windowId: targetWindow });
-  return allTabs.filter((tab) => !isIgnorableTab(tab));
+  try {
+    const queryOpts =
+      typeof windowId === 'number' && windowId >= 0
+        ? { windowId }
+        : { lastFocusedWindow: true };
+    const allTabs = await chrome.tabs.query(queryOpts);
+    return allTabs.filter((tab) => !isIgnorableTab(tab));
+  } catch {
+    return [];
+  }
 }
 
 export async function checkHealth() {
@@ -779,21 +801,25 @@ async function ensureActiveTabNotInCollapsingGroup(windowId, groupIdToCollapse, 
     return;
   }
   try {
-    const activeTabs = await chrome.tabs.query({ windowId, active: true });
+    const queryBase =
+      typeof windowId === 'number' && windowId >= 0
+        ? { windowId }
+        : { lastFocusedWindow: true };
+    const activeTabs = await chrome.tabs.query({ ...queryBase, active: true });
     const activeTab = activeTabs[0];
     if (!activeTab || activeTab.groupId !== groupIdToCollapse) {
       return;
     }
 
     if (alternateGroupId) {
-      const altTabs = await chrome.tabs.query({ windowId, groupId: alternateGroupId });
+      const altTabs = await chrome.tabs.query({ ...queryBase, groupId: alternateGroupId });
       if (altTabs.length > 0 && altTabs[0].id) {
         await chrome.tabs.update(altTabs[0].id, { active: true });
         return;
       }
     }
 
-    const allWindowTabs = await chrome.tabs.query({ windowId });
+    const allWindowTabs = await chrome.tabs.query(queryBase);
     const fallbackTab = allWindowTabs.find((t) => t.groupId !== groupIdToCollapse && t.id);
     if (fallbackTab?.id) {
       await chrome.tabs.update(fallbackTab.id, { active: true });
@@ -806,29 +832,37 @@ async function findOrCreateGroup(windowId, title, color, tabIds, collapsed = fal
     return null;
   }
 
-  let existingGroupId = null;
-  if (chrome.tabGroups?.query) {
-    const existingGroups = await chrome.tabGroups.query({ windowId, title });
-    if (existingGroups.length > 0) {
-      existingGroupId = existingGroups[0].id;
+  try {
+    let existingGroupId = null;
+    if (chrome.tabGroups?.query) {
+      const queryOpts =
+        typeof windowId === 'number' && windowId >= 0 ? { windowId, title } : { title };
+      const existingGroups = await chrome.tabGroups.query(queryOpts);
+      if (existingGroups.length > 0) {
+        existingGroupId = existingGroups[0].id;
+      }
     }
+
+    const groupOptions = existingGroupId
+      ? { groupId: existingGroupId, tabIds }
+      : typeof windowId === 'number' && windowId >= 0
+      ? { createProperties: { windowId }, tabIds }
+      : { tabIds };
+
+    const groupId = await chrome.tabs.group(groupOptions);
+
+    if (chrome.tabGroups?.update) {
+      await chrome.tabGroups.update(groupId, {
+        title,
+        color,
+        collapsed,
+      });
+    }
+
+    return groupId;
+  } catch {
+    return null;
   }
-
-  const groupOptions = existingGroupId
-    ? { groupId: existingGroupId, tabIds }
-    : { createProperties: { windowId }, tabIds };
-
-  const groupId = await chrome.tabs.group(groupOptions);
-
-  if (chrome.tabGroups?.update) {
-    await chrome.tabGroups.update(groupId, {
-      title,
-      color,
-      collapsed,
-    });
-  }
-
-  return groupId;
 }
 
 export async function applyGroupCollapseForMode(mode, windowId) {
@@ -836,8 +870,9 @@ export async function applyGroupCollapseForMode(mode, windowId) {
     return;
   }
   try {
-    const targetWindow = windowId ?? chrome.windows.WINDOW_ID_CURRENT;
-    const groups = await chrome.tabGroups.query({ windowId: targetWindow });
+    const queryOpts =
+      typeof windowId === 'number' && windowId >= 0 ? { windowId } : {};
+    const groups = await chrome.tabGroups.query(queryOpts);
     const focusGroup = groups.find((g) => g.title === 'Focus');
     const breakGroup = groups.find((g) => g.title === 'Break');
 
@@ -847,7 +882,7 @@ export async function applyGroupCollapseForMode(mode, windowId) {
       }
       if (breakGroup) {
         await ensureActiveTabNotInCollapsingGroup(
-          targetWindow,
+          breakGroup.windowId ?? windowId,
           breakGroup.id,
           focusGroup?.id
         );
@@ -859,7 +894,7 @@ export async function applyGroupCollapseForMode(mode, windowId) {
       }
       if (focusGroup) {
         await ensureActiveTabNotInCollapsingGroup(
-          targetWindow,
+          focusGroup.windowId ?? windowId,
           focusGroup.id,
           breakGroup?.id
         );
@@ -920,14 +955,16 @@ export async function organizeTabsIntoGroups(classifiedTabs, options = {}) {
       false
     );
 
-    if (collapseBreak && breakGroupId) {
-      await ensureActiveTabNotInCollapsingGroup(windowId, breakGroupId, focusGroupId);
-      await chrome.tabGroups.update(breakGroupId, { collapsed: true });
-    }
-    if (collapseFocus && focusGroupId) {
-      await ensureActiveTabNotInCollapsingGroup(windowId, focusGroupId, breakGroupId);
-      await chrome.tabGroups.update(focusGroupId, { collapsed: true });
-    }
+    try {
+      if (collapseBreak && breakGroupId) {
+        await ensureActiveTabNotInCollapsingGroup(windowId, breakGroupId, focusGroupId);
+        await chrome.tabGroups.update(breakGroupId, { collapsed: true });
+      }
+      if (collapseFocus && focusGroupId) {
+        await ensureActiveTabNotInCollapsingGroup(windowId, focusGroupId, breakGroupId);
+        await chrome.tabGroups.update(focusGroupId, { collapsed: true });
+      }
+    } catch {}
 
     groupSummary.push({ windowId, focusGroupId, breakGroupId });
   }

@@ -394,7 +394,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           await saveSettings(overrides);
         }
         const data = await analyzeAndOrganizeCurrentWindow(overrides, {
-          windowId: overrides.windowId ?? chrome.windows.WINDOW_ID_CURRENT,
+          windowId: overrides.windowId,
         });
         sendResponse({ ok: true, data });
         break;
@@ -402,9 +402,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
       case 'LOKKEDIN_ANALYZE_ONLY': {
         const overrides = message.payload || {};
-        const tabs = await getAnalyzableTabs(
-          overrides.windowId ?? chrome.windows.WINDOW_ID_CURRENT
-        );
+        const tabs = await getAnalyzableTabs(overrides.windowId);
         const data = await analyzeTabs(tabs, overrides);
         sendResponse({ ok: true, data });
         break;
