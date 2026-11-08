@@ -10,25 +10,25 @@ const NAV_ITEMS = [
     id: 'home',
     href: '#home',
     icon: 'images/home_150dp_1F1F1F_FILL0_wght400_GRAD0_opsz48.png',
-    alt: 'Home Button',
+    title: 'Home Page',
   },
   {
     id: 'focustopic',
     href: '#focustopic',
     icon: 'images/smart_toy_150dp_1F1F1F_FILL0_wght400_GRAD0_opsz48.png',
-    alt: 'Focus Topic Page Button',
+    title: 'Focus Type Page',
   },
   {
     id: 'settings',
     href: '#settings',
     icon: 'images/settings_150dp_1F1F1F_FILL0_wght400_GRAD0_opsz48.png',
-    alt: 'Settings Button',
+    title: 'Settings Page',
   },
   {
     id: 'contactus',
     href: '#contactus',
     icon: 'images/mail_150dp_1F1F1F_FILL0_wght400_GRAD0_opsz48.png',
-    alt: 'Contact Us Button',
+    title: 'Contact Us Page',
   },
 ];
 
@@ -53,13 +53,15 @@ export default function BaseLayout({ activePage, onNavigate, settings, children 
           <a
             key={item.id}
             href={item.href}
+            title={item.title}
+            data-title={item.title}
             className={activePage === item.id ? 'selected-nav-button' : ''}
             onClick={(e) => {
               e.preventDefault();
               onNavigate(item.id);
             }}
           >
-            <img src={resolveAssetUrl(item.icon)} alt={item.alt} />
+            <img src={resolveAssetUrl(item.icon)} alt={item.title} title={item.title} />
           </a>
         ))}
       </div>

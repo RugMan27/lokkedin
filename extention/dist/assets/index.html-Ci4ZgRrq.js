@@ -1,4 +1,4 @@
-import { C as saveTimerState, D as submitContactForm, S as saveSettings, T as setPendingBreakPrompt, _ as getTimerState, a as analyzeAndOrganizeCurrentWindow, b as resetSettingsToDefault, d as getAnalyzableTabs, g as getSettings, h as getPendingBreakPrompt, i as allowSiteForActiveFocusType, n as DEFAULT_TIMER_STATE, p as getLastAnalysis, r as STORAGE_KEYS, s as applyGroupCollapseForMode, t as DEFAULT_SETTINGS, u as computeNextBreakDurationSec, w as sendBackgroundMessage, x as resolveTabLocally, y as organizeTabsIntoGroups } from "./lokkedin-D_Jnd2lH.js";
+import { A as submitContactForm, C as resolveTabLocally, D as setPendingBreakPrompt, E as sendBackgroundMessage, O as setPendingCyclePrompt, S as resetSettingsToDefault, T as saveTimerState, _ as getPendingCyclePrompt, a as analyzeAndOrganizeCurrentWindow, d as formatDurationLabel, f as getAnalyzableTabs, g as getPendingBreakPrompt, i as allowSiteForActiveFocusType, j as ungroupAllSessionTabs, m as getLastAnalysis, n as DEFAULT_TIMER_STATE, r as STORAGE_KEYS, s as applyGroupCollapseForMode, t as DEFAULT_SETTINGS, u as computeNextBreakDurationSec, v as getSettings, w as saveSettings, x as organizeTabsIntoGroups, y as getTimerState } from "./lokkedin-DAzv0ibX.js";
 // \0rolldown/runtime.js
 var __commonJSMin = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod, mod.exports), cb = null), mod.exports);
 // \0vite/modulepreload-polyfill.js
@@ -11481,25 +11481,25 @@ var NAV_ITEMS = [
 		id: "home",
 		href: "#home",
 		icon: "images/home_150dp_1F1F1F_FILL0_wght400_GRAD0_opsz48.png",
-		alt: "Home Button"
+		title: "Home Page"
 	},
 	{
 		id: "focustopic",
 		href: "#focustopic",
 		icon: "images/smart_toy_150dp_1F1F1F_FILL0_wght400_GRAD0_opsz48.png",
-		alt: "Focus Topic Page Button"
+		title: "Focus Type Page"
 	},
 	{
 		id: "settings",
 		href: "#settings",
 		icon: "images/settings_150dp_1F1F1F_FILL0_wght400_GRAD0_opsz48.png",
-		alt: "Settings Button"
+		title: "Settings Page"
 	},
 	{
 		id: "contactus",
 		href: "#contactus",
 		icon: "images/mail_150dp_1F1F1F_FILL0_wght400_GRAD0_opsz48.png",
-		alt: "Contact Us Button"
+		title: "Contact Us Page"
 	}
 ];
 function BaseLayout({ activePage, onNavigate, settings, children }) {
@@ -11526,6 +11526,8 @@ function BaseLayout({ activePage, onNavigate, settings, children }) {
 				className: "navbar",
 				children: NAV_ITEMS.map((item) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("a", {
 					href: item.href,
+					title: item.title,
+					"data-title": item.title,
 					className: activePage === item.id ? "selected-nav-button" : "",
 					onClick: (e) => {
 						e.preventDefault();
@@ -11533,7 +11535,8 @@ function BaseLayout({ activePage, onNavigate, settings, children }) {
 					},
 					children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("img", {
 						src: resolveAssetUrl$1(item.icon),
-						alt: item.alt
+						alt: item.title,
+						title: item.title
 					})
 				}, item.id))
 			})
@@ -11923,7 +11926,7 @@ function parseTimeInput(value, fallbackSec) {
 	if (/^\d+$/.test(clean)) return Math.max(1, Math.min(180, parseInt(clean, 10))) * 60;
 	if (/^\d{1,3}:\d{1,2}$/.test(clean)) {
 		const [m, s] = clean.split(":").map((n) => parseInt(n, 10));
-		return Math.max(5, m * 60 + s);
+		return Math.max(1, m * 60 + s);
 	}
 	return fallbackSec;
 }
@@ -12050,7 +12053,7 @@ function HomeView({ tabs, timer, settings, isAnalyzing, statusText, onStartOrPau
 		}),
 		showEndModal && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PopupNotification, {
 			title: "End Session",
-			message: "Are you sure you want to end your session? This will clear all cycles and reset the timer.",
+			message: "Are you sure you want to end your session? This will remove all tab groups, clear all cycles, and reset the timer.",
 			actions: [{
 				label: "END Session",
 				danger: true,
@@ -12333,6 +12336,8 @@ function App() {
 	const [isAnalyzing, setIsAnalyzing] = (0, import_react.useState)(false);
 	const [statusText, setStatusText] = (0, import_react.useState)("");
 	const [breakPrompt, setBreakPrompt] = (0, import_react.useState)(null);
+	const [cyclePrompt, setCyclePrompt] = (0, import_react.useState)(null);
+	const completingEndTimeRef = (0, import_react.useRef)(null);
 	const refreshTabsWithCategories = (0, import_react.useCallback)(async (overrideSettings) => {
 		const [openTabs, lastResult, currentSettings] = await Promise.all([
 			getAnalyzableTabs(),
@@ -12341,13 +12346,14 @@ function App() {
 		]);
 		const categoryById = /* @__PURE__ */ new Map();
 		const categoryByUrl = /* @__PURE__ */ new Map();
-		if (lastResult?.tabs) for (const item of lastResult.tabs) {
+		const hasActiveAnalysis = Array.isArray(lastResult?.tabs) && lastResult.tabs.length > 0;
+		if (hasActiveAnalysis) for (const item of lastResult.tabs) {
 			if (item?.id && item?.category) categoryById.set(item.id, item.category);
 			if (item?.url && item?.category) categoryByUrl.set(item.url, item.category);
 		}
 		const mapped = await Promise.all(openTabs.map(async (t) => {
 			let cat = categoryById.get(t.id) || categoryByUrl.get(t.url) || null;
-			if (!cat) {
+			if (!cat && hasActiveAnalysis) {
 				const localHit = await resolveTabLocally(t, currentSettings);
 				if (localHit?.category) cat = localHit.category;
 			}
@@ -12363,14 +12369,16 @@ function App() {
 	}, []);
 	(0, import_react.useEffect)(() => {
 		(async () => {
-			const [loadedSettings, loadedTimer, loadedPrompt] = await Promise.all([
+			const [loadedSettings, loadedTimer, loadedBreakPrompt, loadedCyclePrompt] = await Promise.all([
 				getSettings(),
 				getTimerState(),
-				getPendingBreakPrompt()
+				getPendingBreakPrompt(),
+				getPendingCyclePrompt()
 			]);
 			setSettings(loadedSettings);
 			setTimer(loadedTimer);
-			setBreakPrompt(loadedPrompt);
+			setBreakPrompt(loadedBreakPrompt);
+			setCyclePrompt(loadedCyclePrompt);
 			await refreshTabsWithCategories(loadedSettings);
 		})();
 	}, [refreshTabsWithCategories]);
@@ -12387,6 +12395,7 @@ function App() {
 			}));
 			if (changes[STORAGE_KEYS.LAST_RESULT] || changes[STORAGE_KEYS.LOCAL_TAB_CACHE]) refreshTabsWithCategories();
 			if (changes[STORAGE_KEYS.PENDING_BREAK_PROMPT]) setBreakPrompt(changes[STORAGE_KEYS.PENDING_BREAK_PROMPT].newValue || null);
+			if (changes[STORAGE_KEYS.PENDING_CYCLE_PROMPT]) setCyclePrompt(changes[STORAGE_KEYS.PENDING_CYCLE_PROMPT].newValue || null);
 		};
 		chrome.storage.onChanged.addListener(listener);
 		return () => chrome.storage.onChanged.removeListener(listener);
@@ -12423,27 +12432,51 @@ function App() {
 	}, [refreshTabsWithCategories]);
 	(0, import_react.useEffect)(() => {
 		if (!timer.isRunning || timer.isPaused || !timer.targetEndTime) return;
-		const intervalId = setInterval(() => {
+		const intervalId = setInterval(async () => {
 			const remaining = Math.max(0, Math.ceil((timer.targetEndTime - Date.now()) / 1e3));
 			if (remaining <= 0) {
-				const finishedFocus = timer.mode === "focus";
-				const nextMode = finishedFocus ? "break" : "focus";
-				const newFocusCount = (timer.focusCount || 0) + (finishedFocus ? 1 : 0);
-				const newBreakCount = (timer.breakCount || 0) + (finishedFocus ? 0 : 1);
-				const nextDuration = nextMode === "focus" ? timer.focusDurationSec : computeNextBreakDurationSec(settings, timer, newFocusCount);
-				syncTimerToBackground({
-					mode: nextMode,
-					isRunning: true,
-					isPaused: false,
-					remainingSec: nextDuration,
-					bonusBreakSec: 0,
-					targetEndTime: Date.now() + nextDuration * 1e3,
-					focusCount: newFocusCount,
-					breakCount: newBreakCount
-				});
-				saveSettings({ auto_organize: nextMode === "focus" });
-				syncModeGroupCollapse(nextMode);
-				if (nextMode === "focus") runTabSorting();
+				if (completingEndTimeRef.current === timer.targetEndTime) return;
+				completingEndTimeRef.current = timer.targetEndTime;
+				try {
+					const updatedTimer = await sendBackgroundMessage("LOKKEDIN_COMPLETE_CYCLE");
+					if (updatedTimer) setTimer(updatedTimer);
+					const prompt = await getPendingCyclePrompt();
+					if (prompt) setCyclePrompt(prompt);
+				} catch {
+					const finishedFocus = timer.mode === "focus";
+					const nextMode = finishedFocus ? "break" : "focus";
+					const newFocusCount = (timer.focusCount || 0) + (finishedFocus ? 1 : 0);
+					const newBreakCount = (timer.breakCount || 0) + (finishedFocus ? 0 : 1);
+					const completedBreakSec = computeNextBreakDurationSec(settings, timer, timer.focusCount || 0);
+					const nextDuration = nextMode === "focus" ? timer.focusDurationSec : computeNextBreakDurationSec(settings, timer, newFocusCount);
+					const focusLabel = formatDurationLabel(timer.focusDurationSec);
+					const nextBreakLabel = formatDurationLabel(nextDuration);
+					const completedBreakLabel = formatDurationLabel(completedBreakSec);
+					const fallbackPrompt = finishedFocus ? {
+						title: "Focus Complete!",
+						message: `Congratulations on completing your ${focusLabel} focus time! You now have a ${nextBreakLabel} break.`,
+						timestamp: Date.now()
+					} : {
+						title: "Break Over!",
+						message: `Your ${completedBreakLabel} break is over! You now need to focus for ${focusLabel}.`,
+						timestamp: Date.now()
+					};
+					await setPendingCyclePrompt(fallbackPrompt);
+					setCyclePrompt(fallbackPrompt);
+					await syncTimerToBackground({
+						mode: nextMode,
+						isRunning: true,
+						isPaused: false,
+						remainingSec: nextDuration,
+						bonusBreakSec: 0,
+						targetEndTime: Date.now() + nextDuration * 1e3,
+						focusCount: newFocusCount,
+						breakCount: newBreakCount
+					});
+					await saveSettings({ auto_organize: nextMode === "focus" });
+					await syncModeGroupCollapse(nextMode);
+					if (nextMode === "focus") await runTabSorting();
+				}
 			} else setTimer((prev) => ({
 				...prev,
 				remainingSec: remaining
@@ -12520,8 +12553,16 @@ function App() {
 		});
 		await handleUpdateSettings({ auto_organize: false });
 		await setPendingBreakPrompt(null);
+		await setPendingCyclePrompt(null);
 		setBreakPrompt(null);
+		setCyclePrompt(null);
 		setStatusText("");
+		try {
+			await sendBackgroundMessage("LOKKEDIN_UNGROUP_ALL");
+		} catch {
+			await ungroupAllSessionTabs();
+		}
+		await refreshTabsWithCategories();
 	};
 	const handleConfirmNextCycle = async ({ addRemainingBreak = false } = {}) => {
 		const finishedFocus = timer.mode === "focus";
@@ -12576,6 +12617,14 @@ function App() {
 		setBreakPrompt(null);
 		await refreshTabsWithCategories();
 	};
+	const handleDismissCyclePrompt = async () => {
+		try {
+			await sendBackgroundMessage("LOKKEDIN_DISMISS_CYCLE_PROMPT");
+		} catch {
+			await setPendingCyclePrompt(null);
+		}
+		setCyclePrompt(null);
+	};
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(BaseLayout, {
 		activePage,
 		onNavigate: setActivePage,
@@ -12604,6 +12653,14 @@ function App() {
 			activePage === "contactus" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ContactUsView, {
 				settings,
 				timer
+			}),
+			cyclePrompt && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PopupNotification, {
+				title: cyclePrompt.title,
+				message: cyclePrompt.message,
+				actions: [{
+					label: "OK",
+					onClick: handleDismissCyclePrompt
+				}]
 			}),
 			breakPrompt && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PopupNotification, {
 				title: "Break Tab Detected",

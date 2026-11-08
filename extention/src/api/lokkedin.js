@@ -44,6 +44,7 @@ export const STORAGE_KEYS = {
   TIMER_STATE: 'lokkedin_timer_state',
   LOCAL_TAB_CACHE: 'lokkedin_local_tab_cache',
   PENDING_BREAK_PROMPT: 'lokkedin_pending_break_prompt',
+  PENDING_CYCLE_PROMPT: 'lokkedin_pending_cycle_prompt',
 };
 
 const LOCAL_CACHE_MAX_ENTRIES = 500;
@@ -127,6 +128,19 @@ export function computeNextBreakDurationSec(settings, timer, newFocusCount) {
     : Number(timer?.breakDurationSec) || 5 * 60;
 
   return baseSec + (Number(timer?.bonusBreakSec) || 0);
+}
+
+export function formatDurationLabel(totalSeconds) {
+  const safe = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  if (mins > 0 && secs === 0) {
+    return `${mins} minute`;
+  }
+  if (mins > 0) {
+    return `${mins}m ${secs}s`;
+  }
+  return `${secs} second`;
 }
 
 function getStorageArea() {
@@ -250,6 +264,31 @@ export async function setPendingBreakPrompt(promptData) {
     await storage.remove(STORAGE_KEYS.PENDING_BREAK_PROMPT);
   } else {
     await storage.set({ [STORAGE_KEYS.PENDING_BREAK_PROMPT]: promptData });
+  }
+}
+
+export async function getPendingCyclePrompt() {
+  const storage = getStorageArea();
+  if (storage) {
+    const data = await storage.get(STORAGE_KEYS.PENDING_CYCLE_PROMPT);
+    return data?.[STORAGE_KEYS.PENDING_CYCLE_PROMPT] || null;
+  }
+  return null;
+}
+
+export async function setPendingCyclePrompt(promptData) {
+  const storage = getStorageArea();
+  if (!storage) return;
+  if (!promptData) {
+    await storage.remove(STORAGE_KEYS.PENDING_CYCLE_PROMPT);
+  } else {
+    await storage.set({ [STORAGE_KEYS.PENDING_CYCLE_PROMPT]: promptData });
+  }
+}
+
+export async function clearLastAnalysis() {
+  if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+    await chrome.storage.local.remove(STORAGE_KEYS.LAST_RESULT);
   }
 }
 
@@ -980,6 +1019,25 @@ export async function analyzeAndOrganizeCurrentWindow(overrides = {}, { windowId
     ...analysis,
     groups,
   };
+}
+
+export async function ungroupAllSessionTabs(windowId) {
+  await clearLastAnalysis();
+  if (typeof chrome === 'undefined' || !chrome.tabs?.query || !chrome.tabs?.ungroup) {
+    return;
+  }
+  try {
+    const queryOpts =
+      typeof windowId === 'number' && windowId >= 0 ? { windowId } : {};
+    const allTabs = await chrome.tabs.query(queryOpts);
+    const groupedTabIds = allTabs
+      .filter((t) => typeof t.id === 'number' && typeof t.groupId === 'number' && t.groupId >= 0)
+      .map((t) => t.id);
+
+    if (groupedTabIds.length > 0) {
+      await chrome.tabs.ungroup(groupedTabIds);
+    }
+  } catch {}
 }
 
 export function sendBackgroundMessage(type, payload = {}) {

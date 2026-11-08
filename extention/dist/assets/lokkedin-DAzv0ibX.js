@@ -39,7 +39,8 @@ var STORAGE_KEYS = {
 	LAST_RESULT: "lokkedin_last_analysis",
 	TIMER_STATE: "lokkedin_timer_state",
 	LOCAL_TAB_CACHE: "lokkedin_local_tab_cache",
-	PENDING_BREAK_PROMPT: "lokkedin_pending_break_prompt"
+	PENDING_BREAK_PROMPT: "lokkedin_pending_break_prompt",
+	PENDING_CYCLE_PROMPT: "lokkedin_pending_cycle_prompt"
 };
 var LOCAL_CACHE_MAX_ENTRIES = 500;
 var IGNORED_PROTOCOLS = [
@@ -141,6 +142,14 @@ function hexToChromeGroupColor(hex, fallback = "green") {
 function computeNextBreakDurationSec(settings, timer, newFocusCount) {
 	return (Boolean(settings?.longBreakEnabled) && Number(settings?.longBreakInterval) > 0 && newFocusCount > 0 && newFocusCount % Number(settings.longBreakInterval) === 0 ? Number(settings?.longBreakDurationSec) || 1800 : Number(timer?.breakDurationSec) || 300) + (Number(timer?.bonusBreakSec) || 0);
 }
+function formatDurationLabel(totalSeconds) {
+	const safe = Math.max(0, Math.round(Number(totalSeconds) || 0));
+	const mins = Math.floor(safe / 60);
+	const secs = safe % 60;
+	if (mins > 0 && secs === 0) return `${mins} minute`;
+	if (mins > 0) return `${mins}m ${secs}s`;
+	return `${secs} second`;
+}
 function getStorageArea() {
 	if (typeof chrome !== "undefined" && chrome.storage) return chrome.storage.local || chrome.storage.sync;
 	return null;
@@ -237,6 +246,20 @@ async function setPendingBreakPrompt(promptData) {
 	if (!storage) return;
 	if (!promptData) await storage.remove(STORAGE_KEYS.PENDING_BREAK_PROMPT);
 	else await storage.set({ [STORAGE_KEYS.PENDING_BREAK_PROMPT]: promptData });
+}
+async function getPendingCyclePrompt() {
+	const storage = getStorageArea();
+	if (storage) return (await storage.get(STORAGE_KEYS.PENDING_CYCLE_PROMPT))?.[STORAGE_KEYS.PENDING_CYCLE_PROMPT] || null;
+	return null;
+}
+async function setPendingCyclePrompt(promptData) {
+	const storage = getStorageArea();
+	if (!storage) return;
+	if (!promptData) await storage.remove(STORAGE_KEYS.PENDING_CYCLE_PROMPT);
+	else await storage.set({ [STORAGE_KEYS.PENDING_CYCLE_PROMPT]: promptData });
+}
+async function clearLastAnalysis() {
+	if (typeof chrome !== "undefined" && chrome.storage?.local) await chrome.storage.local.remove(STORAGE_KEYS.LAST_RESULT);
 }
 function normalizeRule(rule) {
 	let r = (rule || "").trim().toLowerCase();
@@ -785,6 +808,15 @@ async function analyzeAndOrganizeCurrentWindow(overrides = {}, { windowId } = {}
 		groups
 	};
 }
+async function ungroupAllSessionTabs(windowId) {
+	await clearLastAnalysis();
+	if (typeof chrome === "undefined" || !chrome.tabs?.query || !chrome.tabs?.ungroup) return;
+	try {
+		const queryOpts = typeof windowId === "number" && windowId >= 0 ? { windowId } : {};
+		const groupedTabIds = (await chrome.tabs.query(queryOpts)).filter((t) => typeof t.id === "number" && typeof t.groupId === "number" && t.groupId >= 0).map((t) => t.id);
+		if (groupedTabIds.length > 0) await chrome.tabs.ungroup(groupedTabIds);
+	} catch {}
+}
 function sendBackgroundMessage(type, payload = {}) {
 	return new Promise((resolve, reject) => {
 		if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
@@ -808,4 +840,4 @@ function sendBackgroundMessage(type, payload = {}) {
 		});
 	});
 }
-export { saveTimerState as C, submitContactForm as D, splitUrl as E, saveSettings as S, setPendingBreakPrompt as T, getTimerState as _, analyzeAndOrganizeCurrentWindow as a, resetSettingsToDefault as b, checkHealth as c, getAnalyzableTabs as d, getAuthToken as f, getSettings as g, getPendingBreakPrompt as h, allowSiteForActiveFocusType as i, clearUserCache as l, getMe as m, DEFAULT_TIMER_STATE as n, analyzeTabs as o, getLastAnalysis as p, STORAGE_KEYS as r, applyGroupCollapseForMode as s, DEFAULT_SETTINGS as t, computeNextBreakDurationSec as u, isIgnorableTab as v, sendBackgroundMessage as w, resolveTabLocally as x, organizeTabsIntoGroups as y };
+export { submitContactForm as A, resolveTabLocally as C, setPendingBreakPrompt as D, sendBackgroundMessage as E, setPendingCyclePrompt as O, resetSettingsToDefault as S, saveTimerState as T, getPendingCyclePrompt as _, analyzeAndOrganizeCurrentWindow as a, isIgnorableTab as b, checkHealth as c, formatDurationLabel as d, getAnalyzableTabs as f, getPendingBreakPrompt as g, getMe as h, allowSiteForActiveFocusType as i, ungroupAllSessionTabs as j, splitUrl as k, clearUserCache as l, getLastAnalysis as m, DEFAULT_TIMER_STATE as n, analyzeTabs as o, getAuthToken as p, STORAGE_KEYS as r, applyGroupCollapseForMode as s, DEFAULT_SETTINGS as t, computeNextBreakDurationSec as u, getSettings as v, saveSettings as w, organizeTabsIntoGroups as x, getTimerState as y };

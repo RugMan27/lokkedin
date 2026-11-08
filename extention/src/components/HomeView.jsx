@@ -17,7 +17,7 @@ function parseTimeInput(value, fallbackSec) {
   }
   if (/^\d{1,3}:\d{1,2}$/.test(clean)) {
     const [m, s] = clean.split(':').map((n) => parseInt(n, 10));
-    return Math.max(5, m * 60 + s);
+    return Math.max(1, m * 60 + s);
   }
   return fallbackSec;
 }
@@ -191,7 +191,7 @@ export default function HomeView({
       {showEndModal && (
         <PopupNotification
           title="End Session"
-          message="Are you sure you want to end your session? This will clear all cycles and reset the timer."
+          message="Are you sure you want to end your session? This will remove all tab groups, clear all cycles, and reset the timer."
           actions={[
             {
               label: 'END Session',

@@ -1,9 +1,10 @@
-import { C as saveTimerState, E as splitUrl, S as saveSettings, T as setPendingBreakPrompt, _ as getTimerState, a as analyzeAndOrganizeCurrentWindow, c as checkHealth, d as getAnalyzableTabs, f as getAuthToken, g as getSettings, i as allowSiteForActiveFocusType, l as clearUserCache, m as getMe, o as analyzeTabs, s as applyGroupCollapseForMode, u as computeNextBreakDurationSec, v as isIgnorableTab, x as resolveTabLocally, y as organizeTabsIntoGroups } from "./lokkedin-D_Jnd2lH.js";
+import { C as resolveTabLocally, D as setPendingBreakPrompt, O as setPendingCyclePrompt, T as saveTimerState, a as analyzeAndOrganizeCurrentWindow, b as isIgnorableTab, c as checkHealth, d as formatDurationLabel, f as getAnalyzableTabs, h as getMe, i as allowSiteForActiveFocusType, j as ungroupAllSessionTabs, k as splitUrl, l as clearUserCache, o as analyzeTabs, p as getAuthToken, s as applyGroupCollapseForMode, u as computeNextBreakDurationSec, v as getSettings, w as saveSettings, x as organizeTabsIntoGroups, y as getTimerState } from "./lokkedin-DAzv0ibX.js";
 // src/background.js
 var TAB_DWELL_MS = 3e4;
 var pendingTabTimers = /* @__PURE__ */ new Map();
 var lastAnalyzedTabUrl = /* @__PURE__ */ new Map();
 var cycleTimeoutId = null;
+var lastCompletedEndTime = null;
 function clearAllPendingTabTimers() {
 	for (const timerId of pendingTabTimers.values()) clearTimeout(timerId);
 	pendingTabTimers.clear();
@@ -154,6 +155,173 @@ function injectBreakTabPopupOnPage(tab, settings) {
 		}]
 	}).catch(() => {});
 }
+async function injectCycleTransitionPopupOnPage(cyclePrompt, settings) {
+	if (typeof chrome === "undefined" || !chrome.scripting?.executeScript || !chrome.tabs?.query) return;
+	try {
+		const tab = (await chrome.tabs.query({
+			active: true,
+			lastFocusedWindow: true
+		}))[0];
+		if (!tab?.id || isIgnorableTab(tab)) return;
+		const logoUrl = chrome.runtime.getURL("images/LokkedIn-removebg-preview 1.png");
+		const darkMode = Boolean(settings?.darkMode);
+		const dyslexicFont = Boolean(settings?.dyslexicFont);
+		const fontSize = settings?.fontSize || "medium";
+		await chrome.scripting.executeScript({
+			target: { tabId: tab.id },
+			func: (payload) => {
+				const existing = document.getElementById("lokkedin-cycle-prompt-host");
+				if (existing) existing.remove();
+				const hostEl = document.createElement("div");
+				hostEl.id = "lokkedin-cycle-prompt-host";
+				hostEl.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);";
+				const bg = payload.darkMode ? "#27272a" : "white";
+				const fg = payload.darkMode ? "#f4f4f5" : "black";
+				const borderCol = payload.darkMode ? "#71717a" : "black";
+				const fontFam = payload.dyslexicFont ? "\"Comic Sans MS\", \"Trebuchet MS\", Verdana, sans-serif" : "\"Times New Roman\", Times, serif";
+				const fontPx = payload.fontSize === "small" ? "13px" : payload.fontSize === "large" ? "19px" : "16px";
+				const imgFilter = payload.darkMode ? "invert(1) hue-rotate(180deg)" : "none";
+				const shadow = hostEl.attachShadow({ mode: "open" });
+				shadow.innerHTML = `
+          <style>
+            .popup-notification {
+              min-height: 150px;
+              width: 300px;
+              display: flex;
+              flex-direction: column;
+              overflow: hidden;
+              border-radius: 10px;
+              border: 2px solid ${borderCol};
+              background: ${bg};
+              color: ${fg};
+              font-family: ${fontFam};
+              box-sizing: border-box;
+              box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+            }
+            .popup-header {
+              display: flex;
+              align-items: center;
+              justify-content: left;
+              padding: 10px 20px;
+              border-bottom: 2px solid ${borderCol};
+            }
+            .popup-header img {
+              height: 20px;
+              width: auto;
+              max-width: 100%;
+              object-fit: contain;
+              flex-shrink: 0;
+              display: block;
+              filter: ${imgFilter};
+            }
+            .popup-title {
+              justify-content: right;
+              margin-left: 20px;
+              font-weight: bold;
+              font-size: ${fontPx};
+            }
+            .content {
+              flex: 1;
+              padding: 10px 20px;
+              font-size: ${fontPx};
+            }
+            .popup-text {
+              display: block;
+              margin-bottom: 12px;
+            }
+            .actions {
+              display: flex;
+              gap: 8px;
+              justify-content: center;
+            }
+            button {
+              border-radius: 5px;
+              border: 2px solid ${borderCol};
+              padding: 4px 12px;
+              cursor: pointer;
+              font-family: inherit;
+              background: #f0f0f0;
+              color: black;
+            }
+            button:hover {
+              background-color: lightskyblue;
+            }
+          </style>
+          <div class="popup-notification">
+            <div class="popup-header">
+              <img src="${payload.logoUrl}" alt="LokkedIn" />
+              <div class="popup-title">
+                <header>${payload.title}</header>
+              </div>
+            </div>
+            <main class="content">
+              <header class="popup-text">${payload.message}</header>
+              <div class="actions">
+                <button id="lokkedin-cycle-ok-btn">OK</button>
+              </div>
+            </main>
+          </div>
+        `;
+				document.documentElement.appendChild(hostEl);
+				shadow.getElementById("lokkedin-cycle-ok-btn").addEventListener("click", () => {
+					chrome.runtime.sendMessage({ type: "LOKKEDIN_DISMISS_CYCLE_PROMPT" });
+					hostEl.remove();
+				});
+			},
+			args: [{
+				title: cyclePrompt.title,
+				message: cyclePrompt.message,
+				logoUrl,
+				darkMode,
+				dyslexicFont,
+				fontSize
+			}]
+		});
+	} catch {}
+}
+async function completeCurrentCycleTransition() {
+	const [latest, settings] = await Promise.all([getTimerState(), getSettings()]);
+	if (!latest.isRunning || latest.isPaused || !latest.targetEndTime) return latest;
+	if (lastCompletedEndTime === latest.targetEndTime) return latest;
+	if (Date.now() < latest.targetEndTime - 500) return latest;
+	lastCompletedEndTime = latest.targetEndTime;
+	const finishedFocus = latest.mode === "focus";
+	const nextMode = finishedFocus ? "break" : "focus";
+	const newFocusCount = (latest.focusCount || 0) + (finishedFocus ? 1 : 0);
+	const newBreakCount = (latest.breakCount || 0) + (finishedFocus ? 0 : 1);
+	const completedBreakSec = computeNextBreakDurationSec(settings, latest, latest.focusCount || 0);
+	const nextDuration = nextMode === "focus" ? latest.focusDurationSec : computeNextBreakDurationSec(settings, latest, newFocusCount);
+	const focusLabel = formatDurationLabel(latest.focusDurationSec);
+	const nextBreakLabel = formatDurationLabel(nextDuration);
+	const completedBreakLabel = formatDurationLabel(completedBreakSec);
+	const cyclePrompt = finishedFocus ? {
+		title: "Focus Complete!",
+		message: `Congratulations on completing your ${focusLabel} focus time! You now have a ${nextBreakLabel} break.`,
+		timestamp: Date.now()
+	} : {
+		title: "Break Over!",
+		message: `Your ${completedBreakLabel} break is over! You now need to focus for ${focusLabel}.`,
+		timestamp: Date.now()
+	};
+	const updated = await saveTimerState({
+		mode: nextMode,
+		remainingSec: nextDuration,
+		bonusBreakSec: nextMode === "break" ? 0 : latest.bonusBreakSec || 0,
+		targetEndTime: Date.now() + nextDuration * 1e3,
+		focusCount: newFocusCount,
+		breakCount: newBreakCount
+	});
+	await setPendingCyclePrompt(cyclePrompt);
+	injectCycleTransitionPopupOnPage(cyclePrompt, settings);
+	await saveSettings({ auto_organize: nextMode === "focus" });
+	await applyGroupCollapseForMode(nextMode);
+	if (nextMode === "focus") try {
+		await analyzeAndOrganizeCurrentWindow({});
+	} catch {}
+	else clearAllPendingTabTimers();
+	scheduleBackgroundTimerTransition(updated);
+	return updated;
+}
 function scheduleBackgroundTimerTransition(timerState) {
 	if (cycleTimeoutId) {
 		clearTimeout(cycleTimeoutId);
@@ -164,29 +332,8 @@ function scheduleBackgroundTimerTransition(timerState) {
 		return;
 	}
 	const delayMs = Math.max(0, timerState.targetEndTime - Date.now());
-	cycleTimeoutId = setTimeout(async () => {
-		const [latest, settings] = await Promise.all([getTimerState(), getSettings()]);
-		if (!latest.isRunning || latest.isPaused) return;
-		const finishedFocus = latest.mode === "focus";
-		const nextMode = finishedFocus ? "break" : "focus";
-		const newFocusCount = (latest.focusCount || 0) + (finishedFocus ? 1 : 0);
-		const newBreakCount = (latest.breakCount || 0) + (finishedFocus ? 0 : 1);
-		const nextDuration = nextMode === "focus" ? latest.focusDurationSec : computeNextBreakDurationSec(settings, latest, newFocusCount);
-		const updated = await saveTimerState({
-			mode: nextMode,
-			remainingSec: nextDuration,
-			bonusBreakSec: nextMode === "break" ? 0 : latest.bonusBreakSec || 0,
-			targetEndTime: Date.now() + nextDuration * 1e3,
-			focusCount: newFocusCount,
-			breakCount: newBreakCount
-		});
-		await saveSettings({ auto_organize: nextMode === "focus" });
-		await applyGroupCollapseForMode(nextMode);
-		if (nextMode === "focus") try {
-			await analyzeAndOrganizeCurrentWindow({});
-		} catch {}
-		else clearAllPendingTabTimers();
-		scheduleBackgroundTimerTransition(updated);
+	cycleTimeoutId = setTimeout(() => {
+		completeCurrentCycleTransition();
 	}, delayMs);
 }
 async function warmupBackgroundSession() {
@@ -350,6 +497,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 				});
 				break;
 			}
+			case "LOKKEDIN_COMPLETE_CYCLE":
+				sendResponse({
+					ok: true,
+					data: await completeCurrentCycleTransition()
+				});
+				break;
+			case "LOKKEDIN_DISMISS_CYCLE_PROMPT":
+				await setPendingCyclePrompt(null);
+				sendResponse({ ok: true });
+				break;
+			case "LOKKEDIN_UNGROUP_ALL":
+				clearAllPendingTabTimers();
+				lastAnalyzedTabUrl.clear();
+				await setPendingBreakPrompt(null);
+				await setPendingCyclePrompt(null);
+				await ungroupAllSessionTabs(message.payload?.windowId);
+				sendResponse({ ok: true });
+				break;
 			case "LOKKEDIN_GET_STATUS": {
 				const [settings, timer, health, me] = await Promise.all([
 					getSettings(),

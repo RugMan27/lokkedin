@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
 import {
   DEFAULT_SETTINGS,
@@ -8,9 +8,11 @@ import {
   analyzeAndOrganizeCurrentWindow,
   applyGroupCollapseForMode,
   computeNextBreakDurationSec,
+  formatDurationLabel,
   getAnalyzableTabs,
   getLastAnalysis,
   getPendingBreakPrompt,
+  getPendingCyclePrompt,
   getSettings,
   getTimerState,
   organizeTabsIntoGroups,
@@ -20,6 +22,8 @@ import {
   saveTimerState,
   sendBackgroundMessage,
   setPendingBreakPrompt,
+  setPendingCyclePrompt,
+  ungroupAllSessionTabs,
 } from './api/lokkedin.js';
 import BaseLayout from './components/BaseLayout.jsx';
 import ContactUsView from './components/ContactUsView.jsx';
@@ -36,6 +40,8 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [statusText, setStatusText] = useState('');
   const [breakPrompt, setBreakPrompt] = useState(null);
+  const [cyclePrompt, setCyclePrompt] = useState(null);
+  const completingEndTimeRef = useRef(null);
 
   const refreshTabsWithCategories = useCallback(async (overrideSettings) => {
     const [openTabs, lastResult, currentSettings] = await Promise.all([
@@ -46,7 +52,8 @@ export default function App() {
 
     const categoryById = new Map();
     const categoryByUrl = new Map();
-    if (lastResult?.tabs) {
+    const hasActiveAnalysis = Array.isArray(lastResult?.tabs) && lastResult.tabs.length > 0;
+    if (hasActiveAnalysis) {
       for (const item of lastResult.tabs) {
         if (item?.id && item?.category) {
           categoryById.set(item.id, item.category);
@@ -60,7 +67,7 @@ export default function App() {
     const mapped = await Promise.all(
       openTabs.map(async (t) => {
         let cat = categoryById.get(t.id) || categoryByUrl.get(t.url) || null;
-        if (!cat) {
+        if (!cat && hasActiveAnalysis) {
           const localHit = await resolveTabLocally(t, currentSettings);
           if (localHit?.category) {
             cat = localHit.category;
@@ -81,14 +88,17 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [loadedSettings, loadedTimer, loadedPrompt] = await Promise.all([
-        getSettings(),
-        getTimerState(),
-        getPendingBreakPrompt(),
-      ]);
+      const [loadedSettings, loadedTimer, loadedBreakPrompt, loadedCyclePrompt] =
+        await Promise.all([
+          getSettings(),
+          getTimerState(),
+          getPendingBreakPrompt(),
+          getPendingCyclePrompt(),
+        ]);
       setSettings(loadedSettings);
       setTimer(loadedTimer);
-      setBreakPrompt(loadedPrompt);
+      setBreakPrompt(loadedBreakPrompt);
+      setCyclePrompt(loadedCyclePrompt);
       await refreshTabsWithCategories(loadedSettings);
     })();
   }, [refreshTabsWithCategories]);
@@ -109,6 +119,9 @@ export default function App() {
       }
       if (changes[STORAGE_KEYS.PENDING_BREAK_PROMPT]) {
         setBreakPrompt(changes[STORAGE_KEYS.PENDING_BREAK_PROMPT].newValue || null);
+      }
+      if (changes[STORAGE_KEYS.PENDING_CYCLE_PROMPT]) {
+        setCyclePrompt(changes[STORAGE_KEYS.PENDING_CYCLE_PROMPT].newValue || null);
       }
     };
     chrome.storage.onChanged.addListener(listener);
@@ -156,33 +169,74 @@ export default function App() {
       return;
     }
 
-    const intervalId = setInterval(() => {
+    const intervalId = setInterval(async () => {
       const remaining = Math.max(0, Math.ceil((timer.targetEndTime - Date.now()) / 1000));
       if (remaining <= 0) {
-        const finishedFocus = timer.mode === 'focus';
-        const nextMode = finishedFocus ? 'break' : 'focus';
-        const newFocusCount = (timer.focusCount || 0) + (finishedFocus ? 1 : 0);
-        const newBreakCount = (timer.breakCount || 0) + (finishedFocus ? 0 : 1);
+        if (completingEndTimeRef.current === timer.targetEndTime) {
+          return;
+        }
+        completingEndTimeRef.current = timer.targetEndTime;
 
-        const nextDuration =
-          nextMode === 'focus'
-            ? timer.focusDurationSec
-            : computeNextBreakDurationSec(settings, timer, newFocusCount);
+        try {
+          const updatedTimer = await sendBackgroundMessage('LOKKEDIN_COMPLETE_CYCLE');
+          if (updatedTimer) {
+            setTimer(updatedTimer);
+          }
+          const prompt = await getPendingCyclePrompt();
+          if (prompt) {
+            setCyclePrompt(prompt);
+          }
+        } catch {
+          const finishedFocus = timer.mode === 'focus';
+          const nextMode = finishedFocus ? 'break' : 'focus';
+          const newFocusCount = (timer.focusCount || 0) + (finishedFocus ? 1 : 0);
+          const newBreakCount = (timer.breakCount || 0) + (finishedFocus ? 0 : 1);
 
-        syncTimerToBackground({
-          mode: nextMode,
-          isRunning: true,
-          isPaused: false,
-          remainingSec: nextDuration,
-          bonusBreakSec: 0,
-          targetEndTime: Date.now() + nextDuration * 1000,
-          focusCount: newFocusCount,
-          breakCount: newBreakCount,
-        });
-        saveSettings({ auto_organize: nextMode === 'focus' });
-        syncModeGroupCollapse(nextMode);
-        if (nextMode === 'focus') {
-          runTabSorting();
+          const completedBreakSec = computeNextBreakDurationSec(
+            settings,
+            timer,
+            timer.focusCount || 0
+          );
+
+          const nextDuration =
+            nextMode === 'focus'
+              ? timer.focusDurationSec
+              : computeNextBreakDurationSec(settings, timer, newFocusCount);
+
+          const focusLabel = formatDurationLabel(timer.focusDurationSec);
+          const nextBreakLabel = formatDurationLabel(nextDuration);
+          const completedBreakLabel = formatDurationLabel(completedBreakSec);
+
+          const fallbackPrompt = finishedFocus
+            ? {
+                title: 'Focus Complete!',
+                message: `Congratulations on completing your ${focusLabel} focus time! You now have a ${nextBreakLabel} break.`,
+                timestamp: Date.now(),
+              }
+            : {
+                title: 'Break Over!',
+                message: `Your ${completedBreakLabel} break is over! You now need to focus for ${focusLabel}.`,
+                timestamp: Date.now(),
+              };
+
+          await setPendingCyclePrompt(fallbackPrompt);
+          setCyclePrompt(fallbackPrompt);
+
+          await syncTimerToBackground({
+            mode: nextMode,
+            isRunning: true,
+            isPaused: false,
+            remainingSec: nextDuration,
+            bonusBreakSec: 0,
+            targetEndTime: Date.now() + nextDuration * 1000,
+            focusCount: newFocusCount,
+            breakCount: newBreakCount,
+          });
+          await saveSettings({ auto_organize: nextMode === 'focus' });
+          await syncModeGroupCollapse(nextMode);
+          if (nextMode === 'focus') {
+            await runTabSorting();
+          }
         }
       } else {
         setTimer((prev) => ({ ...prev, remainingSec: remaining }));
@@ -282,8 +336,16 @@ export default function App() {
     });
     await handleUpdateSettings({ auto_organize: false });
     await setPendingBreakPrompt(null);
+    await setPendingCyclePrompt(null);
     setBreakPrompt(null);
+    setCyclePrompt(null);
     setStatusText('');
+    try {
+      await sendBackgroundMessage('LOKKEDIN_UNGROUP_ALL');
+    } catch {
+      await ungroupAllSessionTabs();
+    }
+    await refreshTabsWithCategories();
   };
 
   const handleConfirmNextCycle = async ({ addRemainingBreak = false } = {}) => {
@@ -365,6 +427,15 @@ export default function App() {
     await refreshTabsWithCategories();
   };
 
+  const handleDismissCyclePrompt = async () => {
+    try {
+      await sendBackgroundMessage('LOKKEDIN_DISMISS_CYCLE_PROMPT');
+    } catch {
+      await setPendingCyclePrompt(null);
+    }
+    setCyclePrompt(null);
+  };
+
   return (
     <BaseLayout
       activePage={activePage}
@@ -402,6 +473,19 @@ export default function App() {
 
       {activePage === 'contactus' && (
         <ContactUsView settings={settings} timer={timer} />
+      )}
+
+      {cyclePrompt && (
+        <PopupNotification
+          title={cyclePrompt.title}
+          message={cyclePrompt.message}
+          actions={[
+            {
+              label: 'OK',
+              onClick: handleDismissCyclePrompt,
+            },
+          ]}
+        />
       )}
 
       {breakPrompt && (
