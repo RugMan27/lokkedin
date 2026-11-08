@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "LokkedIn",
+  "version": "1.0.0",
+  "icons": {
+    "16": "images/icon.png",
+    "48": "images/icon.png",
+    "128": "images/icon.png"
+  },
+  "action": {
+    "default_popup": "index.html",
+    "default_icon": "images/icon.png"
+  },
+  "background": {
+    "service_worker": "service-worker-loader.js",
+    "type": "module"
+  },
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "storage",
+    "identity",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://lokkedin.xyz/*",
+    "https://*.lokkedin.xyz/*",
+    "https://*.run.app/*",
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "resources": [
+        "images/*"
+      ],
+      "use_dynamic_url": false
+    }
+  ]
+}
