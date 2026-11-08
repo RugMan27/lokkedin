@@ -1,50 +1,259 @@
-/**
- * LokkedIn Background Service Worker (Manifest V3).
- *
- * - Authenticates silently in the background (uses `dev:<id>` on localhost:8000,
- *   or `chrome.identity.getAuthToken()` on Cloud Run).
- * - Automatically classifies & organizes tabs into Green ("Focus") and Red ("Break")
- *   Chrome Tab Groups when `auto_organize` is enabled.
- * - Ignores pinned tabs and internal browser URLs completely.
- * - Exposes message handlers for the popup UI.
- */
-
 import {
+  allowSiteForActiveFocusType,
   analyzeAndOrganizeCurrentWindow,
   analyzeTabs,
+  applyGroupCollapseForMode,
   checkHealth,
   clearUserCache,
+  computeNextBreakDurationSec,
   getAnalyzableTabs,
   getAuthToken,
   getMe,
   getSettings,
+  getTimerState,
   isIgnorableTab,
   organizeTabsIntoGroups,
+  resolveTabLocally,
   saveSettings,
+  saveTimerState,
+  setPendingBreakPrompt,
+  splitUrl,
 } from './api/lokkedin.js';
 
-// Per-tab debounce timers & last-classified URL tracker to prevent duplicate calls
+const TAB_DWELL_MS = 30 * 1000;
 const pendingTabTimers = new Map();
 const lastAnalyzedTabUrl = new Map();
+let cycleTimeoutId = null;
 
-// ---------------------------------------------------------------------------
-// Lifecycle & Silent Auth Warmup
-// ---------------------------------------------------------------------------
+function clearAllPendingTabTimers() {
+  for (const timerId of pendingTabTimers.values()) {
+    clearTimeout(timerId);
+  }
+  pendingTabTimers.clear();
+}
+
+function injectBreakTabPopupOnPage(tab, settings) {
+  if (typeof chrome === 'undefined' || !chrome.scripting?.executeScript || !tab?.id) {
+    return;
+  }
+
+  const [host] = splitUrl(tab.url || '');
+  const logoUrl = chrome.runtime.getURL('images/LokkedIn-removebg-preview 1.png');
+  const darkMode = Boolean(settings?.darkMode);
+  const dyslexicFont = Boolean(settings?.dyslexicFont);
+  const fontSize = settings?.fontSize || 'medium';
+  const topicName = settings?.target_topic || 'Focus';
+
+  chrome.scripting
+    .executeScript({
+      target: { tabId: tab.id },
+      func: (payload) => {
+        const existing = document.getElementById('lokkedin-break-prompt-host');
+        if (existing) existing.remove();
+
+        const hostEl = document.createElement('div');
+        hostEl.id = 'lokkedin-break-prompt-host';
+        hostEl.style.cssText =
+          'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);';
+
+        const bg = payload.darkMode ? '#27272a' : 'white';
+        const fg = payload.darkMode ? '#f4f4f5' : 'black';
+        const borderCol = payload.darkMode ? '#71717a' : 'black';
+        const fontFam = payload.dyslexicFont
+          ? '"Comic Sans MS", "Trebuchet MS", Verdana, sans-serif'
+          : '"Times New Roman", Times, serif';
+        const fontPx =
+          payload.fontSize === 'small'
+            ? '13px'
+            : payload.fontSize === 'large'
+            ? '19px'
+            : '16px';
+        const imgFilter = payload.darkMode ? 'invert(1) hue-rotate(180deg)' : 'none';
+
+        const shadow = hostEl.attachShadow({ mode: 'open' });
+        shadow.innerHTML = `
+          <style>
+            .popup-notification {
+              min-height: 150px;
+              width: 300px;
+              display: flex;
+              flex-direction: column;
+              overflow: hidden;
+              border-radius: 10px;
+              border: 2px solid ${borderCol};
+              background: ${bg};
+              color: ${fg};
+              font-family: ${fontFam};
+              box-sizing: border-box;
+              box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+            }
+            .popup-header {
+              display: flex;
+              align-items: center;
+              justify-content: left;
+              padding: 10px 20px;
+              border-bottom: 2px solid ${borderCol};
+            }
+            .popup-header img {
+              height: 20px;
+              width: auto;
+              max-width: 100%;
+              object-fit: contain;
+              flex-shrink: 0;
+              display: block;
+              filter: ${imgFilter};
+            }
+            .popup-title {
+              justify-content: right;
+              margin-left: 20px;
+              font-weight: bold;
+              font-size: ${fontPx};
+            }
+            .content {
+              flex: 1;
+              padding: 10px 20px;
+              font-size: ${fontPx};
+            }
+            .popup-text {
+              display: block;
+              margin-bottom: 12px;
+            }
+            .actions {
+              display: flex;
+              gap: 8px;
+              justify-content: center;
+            }
+            button {
+              border-radius: 5px;
+              border: 2px solid ${borderCol};
+              padding: 4px 10px;
+              cursor: pointer;
+              font-family: inherit;
+              background: #f0f0f0;
+              color: black;
+            }
+            button:hover {
+              background-color: lightskyblue;
+            }
+          </style>
+          <div class="popup-notification">
+            <div class="popup-header">
+              <img src="${payload.logoUrl}" alt="LokkedIn" />
+              <div class="popup-title">
+                <header>Break Tab Detected</header>
+              </div>
+            </div>
+            <main class="content">
+              <header class="popup-text">
+                Are you supposed to be on <b>${payload.host}</b> for "${payload.topicName}"?
+              </header>
+              <div class="actions">
+                <button id="lokkedin-allow-btn">Yes, Safe Site</button>
+                <button id="lokkedin-dismiss-btn">No, Minimize</button>
+              </div>
+            </main>
+          </div>
+        `;
+
+        document.documentElement.appendChild(hostEl);
+
+        shadow.getElementById('lokkedin-allow-btn').addEventListener('click', () => {
+          chrome.runtime.sendMessage({
+            type: 'LOKKEDIN_ALLOW_BREAK_SITE',
+            payload: {
+              tabId: payload.tabId,
+              windowId: payload.windowId,
+              url: payload.url,
+              title: payload.title,
+            },
+          });
+          hostEl.remove();
+        });
+
+        shadow.getElementById('lokkedin-dismiss-btn').addEventListener('click', () => {
+          chrome.runtime.sendMessage({
+            type: 'LOKKEDIN_DISMISS_BREAK_SITE',
+            payload: {
+              tabId: payload.tabId,
+              windowId: payload.windowId,
+              url: payload.url,
+              title: payload.title,
+            },
+          });
+          hostEl.remove();
+        });
+      },
+      args: [
+        {
+          tabId: tab.id,
+          windowId: tab.windowId,
+          url: tab.url,
+          title: tab.title || tab.url,
+          host: host || tab.url,
+          topicName,
+          logoUrl,
+          darkMode,
+          dyslexicFont,
+          fontSize,
+        },
+      ],
+    })
+    .catch(() => {});
+}
+
+function scheduleBackgroundTimerTransition(timerState) {
+  if (cycleTimeoutId) {
+    clearTimeout(cycleTimeoutId);
+    cycleTimeoutId = null;
+  }
+  if (!timerState.isRunning || timerState.isPaused || !timerState.targetEndTime) {
+    clearAllPendingTabTimers();
+    return;
+  }
+  const delayMs = Math.max(0, timerState.targetEndTime - Date.now());
+  cycleTimeoutId = setTimeout(async () => {
+    const [latest, settings] = await Promise.all([getTimerState(), getSettings()]);
+    if (!latest.isRunning || latest.isPaused) return;
+    const finishedFocus = latest.mode === 'focus';
+    const nextMode = finishedFocus ? 'break' : 'focus';
+    const newFocusCount = (latest.focusCount || 0) + (finishedFocus ? 1 : 0);
+    const newBreakCount = (latest.breakCount || 0) + (finishedFocus ? 0 : 1);
+
+    const nextDuration =
+      nextMode === 'focus'
+        ? latest.focusDurationSec
+        : computeNextBreakDurationSec(settings, latest, newFocusCount);
+
+    const updated = await saveTimerState({
+      mode: nextMode,
+      remainingSec: nextDuration,
+      bonusBreakSec: nextMode === 'break' ? 0 : latest.bonusBreakSec || 0,
+      targetEndTime: Date.now() + nextDuration * 1000,
+      focusCount: newFocusCount,
+      breakCount: newBreakCount,
+    });
+    await saveSettings({ auto_organize: nextMode === 'focus' });
+    await applyGroupCollapseForMode(nextMode);
+
+    if (nextMode === 'focus') {
+      try {
+        await analyzeAndOrganizeCurrentWindow({});
+      } catch {}
+    } else {
+      clearAllPendingTabTimers();
+    }
+    scheduleBackgroundTimerTransition(updated);
+  }, delayMs);
+}
 
 async function warmupBackgroundSession() {
   try {
     const settings = await getSettings();
-    await saveSettings(settings); // Ensure defaults are persisted
-    const token = await getAuthToken({ interactive: false });
-    const me = await getMe({ interactiveAuth: false });
-    console.log('[LokkedIn Background] Session ready:', {
-      user_id: me.user_id,
-      cache_entries: me.cache_entries,
-      token_prefix: token.slice(0, 8),
-    });
-  } catch (err) {
-    console.debug('[LokkedIn Background] Warmup skipped (backend offline or not signed in yet):', err.message);
-  }
+    await saveSettings(settings);
+    const timer = await getTimerState();
+    scheduleBackgroundTimerTransition(timer);
+    await getAuthToken();
+  } catch {}
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -55,42 +264,48 @@ chrome.runtime.onStartup.addListener(() => {
   warmupBackgroundSession();
 });
 
-// ---------------------------------------------------------------------------
-// Automatic Background Tab Classification & Grouping (when auto_organize=true)
-// ---------------------------------------------------------------------------
-
-async function analyzeAndGroupSingleTab(tab) {
-  if (isIgnorableTab(tab)) {
+async function handleTabCheckWithCacheAndDwell(tabId) {
+  if (!tabId || typeof chrome === 'undefined' || !chrome.tabs?.get) {
     return;
   }
 
-  const settings = await getSettings();
-  if (!settings.auto_organize) {
-    return;
-  }
-
-  const currentKey = `${settings.target_topic}|${tab.url}`;
-  if (lastAnalyzedTabUrl.get(tab.id) === currentKey) {
-    return;
-  }
-
+  let tab;
   try {
-    const result = await analyzeTabs([tab], settings, { interactiveAuth: false });
-    if (result.tabs && result.tabs.length > 0) {
-      lastAnalyzedTabUrl.set(tab.id, currentKey);
-      await organizeTabsIntoGroups(result.tabs, settings);
-    }
-  } catch (err) {
-    console.warn('[LokkedIn Background] Auto-analyze failed for tab:', tab.url, err.message);
-  }
-}
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  // Trigger only when page finishes loading or URL changes and tab is not pinned/internal
-  if (changeInfo.status !== 'complete' && !changeInfo.url) {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
     return;
   }
+
   if (isIgnorableTab(tab)) {
+    return;
+  }
+
+  const [settings, timer] = await Promise.all([getSettings(), getTimerState()]);
+  if (!settings.auto_organize || !timer.isRunning || timer.isPaused || timer.mode !== 'focus') {
+    return;
+  }
+
+  const currentKey = `${settings.target_topic}||${settings.notes || ''}||${tab.url}`;
+  if (lastAnalyzedTabUrl.get(tabId) === currentKey) {
+    return;
+  }
+
+  const localHit = await resolveTabLocally(tab, settings);
+  if (localHit) {
+    lastAnalyzedTabUrl.set(tabId, currentKey);
+    await organizeTabsIntoGroups(
+      [
+        {
+          id: tab.id,
+          windowId: tab.windowId,
+          title: tab.title,
+          url: tab.url,
+          category: localHit.category,
+          source: localHit.source,
+        },
+      ],
+      settings
+    );
     return;
   }
 
@@ -98,12 +313,64 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     clearTimeout(pendingTabTimers.get(tabId));
   }
 
-  const timerId = setTimeout(() => {
+  const expectedUrl = tab.url;
+  const timerId = setTimeout(async () => {
     pendingTabTimers.delete(tabId);
-    analyzeAndGroupSingleTab(tab);
-  }, 600);
+    try {
+      const freshTab = await chrome.tabs.get(tabId);
+      if (isIgnorableTab(freshTab) || freshTab.url !== expectedUrl) {
+        return;
+      }
+      const [freshSettings, freshTimer] = await Promise.all([
+        getSettings(),
+        getTimerState(),
+      ]);
+      if (
+        !freshSettings.auto_organize ||
+        !freshTimer.isRunning ||
+        freshTimer.isPaused ||
+        freshTimer.mode !== 'focus'
+      ) {
+        return;
+      }
+      const result = await analyzeTabs([freshTab], freshSettings);
+      if (result.tabs && result.tabs.length > 0) {
+        const classifiedTab = result.tabs[0];
+        lastAnalyzedTabUrl.set(tabId, currentKey);
+
+        if (classifiedTab.category === 'B') {
+          const [host] = splitUrl(freshTab.url);
+          await setPendingBreakPrompt({
+            tabId: freshTab.id,
+            windowId: freshTab.windowId,
+            url: freshTab.url,
+            title: freshTab.title || freshTab.url,
+            host: host || freshTab.url,
+            topicName: freshSettings.target_topic,
+          });
+          injectBreakTabPopupOnPage(freshTab, freshSettings);
+        } else {
+          await organizeTabsIntoGroups(result.tabs, freshSettings);
+        }
+      }
+    } catch {}
+  }, TAB_DWELL_MS);
 
   pendingTabTimers.set(tabId, timerId);
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete') {
+    return;
+  }
+  if (isIgnorableTab(tab)) {
+    return;
+  }
+  handleTabCheckWithCacheAndDwell(tabId);
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  handleTabCheckWithCacheAndDwell(tabId);
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -113,10 +380,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
   lastAnalyzedTabUrl.delete(tabId);
 });
-
-// ---------------------------------------------------------------------------
-// Message Passing API for Popup / UI Teammate
-// ---------------------------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.type !== 'string') {
@@ -131,7 +394,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           await saveSettings(overrides);
         }
         const data = await analyzeAndOrganizeCurrentWindow(overrides, {
-          interactiveAuth: true,
           windowId: overrides.windowId ?? chrome.windows.WINDOW_ID_CURRENT,
         });
         sendResponse({ ok: true, data });
@@ -143,8 +405,36 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const tabs = await getAnalyzableTabs(
           overrides.windowId ?? chrome.windows.WINDOW_ID_CURRENT
         );
-        const data = await analyzeTabs(tabs, overrides, { interactiveAuth: true });
+        const data = await analyzeTabs(tabs, overrides);
         sendResponse({ ok: true, data });
+        break;
+      }
+
+      case 'LOKKEDIN_APPLY_MODE_GROUPS': {
+        const { mode, windowId } = message.payload || {};
+        await applyGroupCollapseForMode(mode, windowId);
+        sendResponse({ ok: true });
+        break;
+      }
+
+      case 'LOKKEDIN_ALLOW_BREAK_SITE': {
+        const updatedSettings = await allowSiteForActiveFocusType(message.payload || {});
+        lastAnalyzedTabUrl.clear();
+        sendResponse({ ok: true, data: updatedSettings });
+        break;
+      }
+
+      case 'LOKKEDIN_DISMISS_BREAK_SITE': {
+        const { tabId, windowId, url, title } = message.payload || {};
+        await setPendingBreakPrompt(null);
+        const settings = await getSettings();
+        if (tabId && windowId) {
+          await organizeTabsIntoGroups(
+            [{ id: tabId, windowId, title: title || url, url, category: 'B', source: 'llm' }],
+            settings
+          );
+        }
+        sendResponse({ ok: true });
         break;
       }
 
@@ -156,24 +446,31 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
       case 'LOKKEDIN_SAVE_SETTINGS': {
         const updated = await saveSettings(message.payload || {});
-        // Clear per-tab URL dedup map if target_topic changed
         lastAnalyzedTabUrl.clear();
         sendResponse({ ok: true, data: updated });
         break;
       }
 
+      case 'LOKKEDIN_SYNC_TIMER': {
+        const updatedTimer = await saveTimerState(message.payload || {});
+        scheduleBackgroundTimerTransition(updatedTimer);
+        sendResponse({ ok: true, data: updatedTimer });
+        break;
+      }
+
       case 'LOKKEDIN_GET_STATUS': {
-        const [settings, health, me] = await Promise.all([
+        const [settings, timer, health, me] = await Promise.all([
           getSettings(),
+          getTimerState(),
           checkHealth().catch((e) => ({ status: 'offline', error: e.message })),
-          getMe({ interactiveAuth: false }).catch((e) => ({ error: e.message })),
+          getMe().catch((e) => ({ error: e.message })),
         ]);
-        sendResponse({ ok: true, data: { settings, health, me } });
+        sendResponse({ ok: true, data: { settings, timer, health, me } });
         break;
       }
 
       case 'LOKKEDIN_CLEAR_CACHE': {
-        const data = await clearUserCache({ interactiveAuth: true });
+        const data = await clearUserCache();
         lastAnalyzedTabUrl.clear();
         sendResponse({ ok: true, data });
         break;
@@ -183,10 +480,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: false, error: `Unknown message type: ${message.type}` });
     }
   })().catch((err) => {
-    console.error('[LokkedIn Background] Error handling message:', message.type, err);
     sendResponse({ ok: false, error: err?.message || String(err) });
   });
 
-  // Return true to keep the message channel open for async sendResponse
   return true;
 });

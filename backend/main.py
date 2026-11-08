@@ -1,9 +1,12 @@
 import asyncio
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
+import hashlib
+import hmac
 import logging
 import os
 from pathlib import Path
+import secrets
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -60,6 +63,7 @@ DEBUG = os.environ.get("LOKKEDIN_DEBUG", "0") == "1"
 DEV_MODE = os.environ.get("DEV_MODE", "0") == "1"
 DEV_AUTH_TOKEN = os.environ.get("DEV_AUTH_TOKEN", "dev-token")
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip() or None
+AUTH_SECRET = os.environ.get("AUTH_SECRET", GEMINI_API_KEY).encode("utf-8")
 
 MAX_TABS = int(os.environ.get("MAX_TABS", "25"))
 MAX_RULES = int(os.environ.get("MAX_RULES", "500"))
@@ -198,6 +202,27 @@ _google_http_request = google_requests.Request()
 security = HTTPBearer(auto_error=False)
 
 
+def create_signed_client_token(client_id: str) -> str:
+    clean_id = "".join(c for c in client_id if c.isalnum() or c in "-_")[:64]
+    if not clean_id:
+        clean_id = secrets.token_hex(12)
+    sig = hmac.new(AUTH_SECRET, clean_id.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    return f"lk_{clean_id}.{sig}"
+
+
+def verify_signed_client_token(token: str) -> Optional[str]:
+    if not token.startswith("lk_") or "." not in token:
+        return None
+    body, _, sig = token.partition(".")
+    client_id = body[3:]
+    if not client_id:
+        return None
+    expected = hmac.new(AUTH_SECRET, client_id.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    if hmac.compare_digest(sig, expected):
+        return f"client:{client_id}"
+    return None
+
+
 def _verify_google_token_sync(token: str) -> Dict[str, Any]:
     if token.count(".") == 2:
         try:
@@ -252,6 +277,15 @@ async def get_current_session(
 
     token = credentials.credentials.strip()
 
+    signed_user_id = verify_signed_client_token(token)
+    if signed_user_id:
+        return session_manager.get_or_create(signed_user_id)
+
+    if token.startswith("client:") and len(token) > 7:
+        clean_client = "".join(c for c in token[7:] if c.isalnum() or c in "-_")[:64]
+        if clean_client:
+            return session_manager.get_or_create(f"client:{clean_client}")
+
     if DEV_MODE:
         if token == DEV_AUTH_TOKEN:
             dev_user = request.headers.get("X-Dev-User", "local-dev").strip() or "local-dev"
@@ -296,6 +330,10 @@ app.add_middleware(
 )
 
 
+class SessionInitRequest(BaseModel):
+    client_id: Optional[str] = Field(default=None, max_length=64)
+
+
 class TabItem(BaseModel):
     title: str = Field(..., max_length=300)
     url: str = Field(..., min_length=1, max_length=2048)
@@ -318,6 +356,15 @@ class TabAnalysisRequest(BaseModel):
     always_focus: List[str] = Field(default_factory=list)
     always_break: List[str] = Field(default_factory=list)
     notes: Optional[str] = Field(default=None, max_length=500)
+
+
+class ContactSubmissionRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=5000)
+    email: Optional[str] = Field(default=None, max_length=320)
+    account: Optional[Dict[str, Any]] = None
+    preferences: Optional[Dict[str, Any]] = None
+    timer_state: Optional[Dict[str, Any]] = None
+    timestamp: Optional[int] = None
 
 
 def normalize_rule(rule: str) -> str:
@@ -388,6 +435,19 @@ def health_check():
     }
 
 
+@app.post("/api/auth/session")
+def issue_client_session(payload: Optional[SessionInitRequest] = None):
+    raw_id = (payload.client_id if payload and payload.client_id else None) or secrets.token_hex(12)
+    token = create_signed_client_token(raw_id)
+    user_id = verify_signed_client_token(token) or f"client:{raw_id}"
+    session_manager.get_or_create(user_id)
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "user_id": user_id,
+    }
+
+
 @app.get("/api/me")
 async def get_me(session: UserSession = Depends(get_current_session)):
     return {
@@ -409,6 +469,25 @@ async def clear_user_cache(session: UserSession = Depends(get_current_session)):
         "status": "cleared",
         "user_id": session.user_id,
         "cleared_entries": cleared,
+    }
+
+
+@app.post("/api/contact")
+async def submit_contact(
+    payload: ContactSubmissionRequest,
+    session: UserSession = Depends(get_current_session),
+):
+    logger.info(
+        "/api/contact [user=%s, email=%s]: message=%r preferences=%s",
+        session.user_id,
+        payload.email or session.email,
+        payload.message,
+        payload.preferences,
+    )
+    return {
+        "status": "received",
+        "user_id": session.user_id,
+        "email": payload.email or session.email,
     }
 
 
